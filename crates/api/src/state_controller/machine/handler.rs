@@ -8890,7 +8890,7 @@ async fn call_machine_setup_and_handle_no_dpu_error(
             boot_interface_mac,
             &site_config.bios_profiles,
             site_config.selected_profile,
-            &HashMap::default(),
+            &site_config.oem_manager_profiles,
         )
         .await;
     match (
@@ -9866,6 +9866,65 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    /// Verify that `oem_manager_profiles` from the site config is forwarded to `machine_setup`.
+    ///
+    /// This test catches regressions where the argument gets dropped or replaced with an empty map.
+    #[tokio::test]
+    async fn test_oem_manager_profiles_passed_to_machine_setup() {
+        use crate::redfish::RedfishClientPool;
+        use crate::redfish::test_support::{RedfishSim, RedfishSimAction};
+        use libredfish::BiosProfileType;
+        use libredfish::model::service_root::RedfishVendor;
+
+        // Build an oem_manager_profiles map with a Dell R760 PSU Hot Spare setting.
+        // This mirrors the fix for the Dell R760 PSU fan issue (nvbugs-5834644).
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "ServerPwr.1.PSRapidOn".to_string(),
+            serde_json::Value::String("Disabled".to_string()),
+        );
+        let mut type_profiles = HashMap::new();
+        type_profiles.insert(BiosProfileType::Performance, attrs);
+        let mut model_profiles = HashMap::new();
+        model_profiles.insert("r760".to_string(), type_profiles);
+        let mut oem_profiles = HashMap::new();
+        oem_profiles.insert(RedfishVendor::Dell, model_profiles);
+
+        let mut config = crate::tests::common::api_fixtures::get_config();
+        config.oem_manager_profiles = oem_profiles.clone();
+
+        use crate::redfish::RedfishAuth;
+        use forge_secrets::credentials::{CredentialKey, CredentialType};
+
+        let sim = RedfishSim::default();
+        let timepoint = sim.timepoint();
+        let client = sim
+            .create_client(
+                "test-host",
+                None,
+                RedfishAuth::Key(CredentialKey::HostRedfish {
+                    credential_type: CredentialType::SiteDefault,
+                }),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let result =
+            call_machine_setup_and_handle_no_dpu_error(client.as_ref(), None, 1, &config).await;
+
+        assert!(result.is_ok());
+
+        let actions = sim.actions_since(&timepoint).all_hosts();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0],
+            RedfishSimAction::MachineSetup {
+                oem_manager_profiles: oem_profiles,
+            }
+        );
+    }
 
     #[test]
     fn test_cycle_1() {
